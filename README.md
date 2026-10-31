@@ -48,6 +48,9 @@ scripts/build-dist.sh              # sdist + wheel into dist/ (needs: pip instal
 scripts/smoke-installed.sh         # install the wheel in a clean venv and start it headless
 ```
 
+## Development
+Gomceix is created and maintained by [mdevlopm](https://github.com/mdevlopm), who laid out its foundations and logic. AI tools assisted with parts of the development, such as coding, testing and review.
+
 ## License
 MIT, see [`LICENSE`](LICENSE), which also says where the downloaded components come from. Not affiliated with or endorsed by Mojang Studios or Microsoft.
 
