@@ -154,7 +154,7 @@ write_manifest() {
         for f in ${m_files[@]+"${m_files[@]}"}; do printf '%s\n' "$f"; written[${f##*$'\t'}]=1; done
         # Entries of an earlier run that this run did not write again.
         while IFS= read -r -d '' path; do
-            [ -n "$path" ] && [ -z "${written[$path]:-}" ] || continue
+            if [ -z "$path" ] || [ -n "${written[$path]:-}" ]; then continue; fi
             [ -e "$path" ] || continue
             printf '%s\t%s\n' "${old_entries[$path]}" "$path"
         done < <(if [ "${#old_entries[@]}" -gt 0 ]; then printf '%s\0' "${!old_entries[@]}" | sort -z; fi)
