@@ -1,0 +1,453 @@
+"""gomceix.core.cli — argument parsing and command dispatch (main)."""
+# SPDX-License-Identifier: MIT
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from . import deps
+from .auth import NativeAuth, msa_signed_in
+from .config import APP, LOGS, PRETTY, VERSION
+from .content import cmd_import
+from .doctor import doctor
+from .games import (
+    installed_builds,
+    list_editions,
+    list_versions,
+    remove_build,
+)
+from .gamesetup import do_setup
+from .launch import (
+    direct_launch_readiness,
+    exit_problem,
+    launch,
+)
+from .log import BolError, IS_TTY, desktop_notify, die, err, info, ok, warn
+from .network import diagnose_network
+from .prefix import reset_prefix
+from .profiles import (
+    create_profile,
+    list_profiles,
+    play_launch_command,
+    profile_launch_command,
+    require_profile_shortcuts_supported,
+    require_shortcuts_supported,
+    write_play_shortcut,
+    write_profile_shortcut,
+)
+from .update import check_for_update, self_update, update_kind
+from . import supervision
+
+
+def _run_network_diagnostics(host_ip=None):
+    """Run and display the read-only connectivity checks."""
+    healthy, checks = diagnose_network(host_ip)
+    for check in checks:
+        state = "OK" if check.ok is True else (
+            "ÉCHEC" if check.ok is False else "INFO"
+        )
+        print(
+            f"  {check.kind:14} {check.target}: {state} — {check.detail}"
+        )
+    return healthy
+
+
+def _fmt_size(size):
+    value = float(size or 0)
+    for unit in ("B", "KiB", "MiB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
+def _build_notes(build):
+    notes = []
+    if build["in_use"]:
+        notes.append("in use")
+    if not build["playable"]:
+        notes.append("incomplete")
+    if build["legacy"]:
+        notes.append("installed before the move to the Store")
+    if not build["managed"]:
+        notes.append("your own folder")
+    return notes
+
+
+# Said by every command that lists or removes a build, because it is the one
+# thing a player needs to know before deleting one and the one thing the
+# folder name does not tell them.
+_BUILDS_KEEP_NOTE = (
+    "Worlds, settings, screenshots and packs are kept with your profile, not "
+    "in these folders, so removing a build removes only the download."
+)
+
+
+def _list_installed_builds():
+    """Every Minecraft build on this machine, and what it takes up."""
+    builds = installed_builds()
+    if not builds:
+        info("No Minecraft build is installed.")
+        return
+    total = 0
+    for build in builds:
+        total += build["size"] or 0
+        notes = _build_notes(build)
+        print(f"  {build['version']:<14}{_fmt_size(build['size']):>10}  "
+              f"{build['name']}"
+              + (f"  ({', '.join(notes)})" if notes else ""))
+        print(f"      {build['path']}")
+    info(f"{len(builds)} build(s), {_fmt_size(total)} in total. "
+         + _BUILDS_KEEP_NOTE)
+
+
+def _remove_installed_build(wanted, edition_id=None):
+    """Delete one downloaded build, named by version or by folder."""
+    builds = installed_builds(with_size=False)
+    if "/" in wanted:
+        target = Path(wanted).expanduser().resolve()
+        matches = [b for b in builds if b["path"].resolve() == target]
+    else:
+        matches = [b for b in builds if b["version"] == wanted]
+        if edition_id:
+            matches = [b for b in matches if b["edition"] == edition_id]
+    if not matches:
+        die(f"No installed build matches '{wanted}'. See: {APP} versions "
+            "--installed")
+    if len(matches) > 1:
+        die(f"'{wanted}' matches {len(matches)} installed builds. Name the "
+            "edition with --mc, or pass the folder instead: "
+            + ", ".join(str(b["path"]) for b in matches))
+    build = matches[0]
+    if not build["managed"]:
+        die(f"{build['path']} is a folder you pointed the launcher at, so it "
+            "is not the launcher's to delete.")
+    freed = remove_build(build["path"])
+    ok(f"Removed {build['name']} {build['version']} — {_fmt_size(freed)} "
+       "freed.")
+    info(_BUILDS_KEEP_NOTE)
+
+
+def _chromeos_container(root=Path("/")):
+    """Whether this runs in ChromeOS's Linux container (Crostini)."""
+    return ((root / "dev/.cros_milestone").exists()
+            or (root / "opt/google/cros-containers").is_dir())
+
+
+def _prefer_x11_on_chromeos(environ=None, root=Path("/")):
+    """Draw the window through XWayland in ChromeOS's Linux container.
+
+    Qt's own Wayland backend crashed the launcher there, on ChromeOS's
+    compositor, and XWayland always runs beside it: the reporter of #302
+    got the window with QT_QPA_PLATFORM=xcb. A platform someone chose is
+    left alone. True when it set one.
+    """
+    env = os.environ if environ is None else environ
+    if (env.get("QT_QPA_PLATFORM") or "").strip():
+        return False
+    if not (env.get("DISPLAY") or "").strip():
+        return False
+    if not (_chromeos_container(root)
+            or (env.get("SOMMELIER_VERSION") or "").strip()):
+        return False
+    env["QT_QPA_PLATFORM"] = "xcb"
+    return True
+
+
+def _gtk_missing():
+    """None when GTK 4 + libadwaita (PyGObject) can be used, else a plain-words
+    message saying what to install. PyGObject cannot be installed with pip like
+    a pure-Python wheel, so there is no bootstrap: the system provides it."""
+    error = deps.gui_import_error()
+    if error is None:
+        return None
+    return ("The launcher window needs GTK 4 and libadwaita with their Python "
+            "bindings (PyGObject), which are not available here. Install them "
+            "with your package manager: Debian/Ubuntu "
+            "`python3-gi gir1.2-gtk-4.0 gir1.2-adw-1`, Fedora "
+            "`python3-gobject gtk4 libadwaita`, Arch "
+            "`python-gobject gtk4 libadwaita`; the Flatpak carries them. "
+            f"`{APP} play` needs none of it. ({error})")
+
+
+def _open_gui():
+    """Open the launcher window, importing the toolkit only when it is asked
+    for, so every other command works on a host without GTK."""
+    missing = _gtk_missing()
+    if missing:
+        die(missing)
+    from gomceix.ui.app import main as run_window
+    code = run_window([APP])
+    if code:
+        sys.exit(code)
+
+
+def _report_launch_failure(message):
+    """Show why PLAY stopped when a shortcut left no terminal to print to."""
+    if IS_TTY:
+        return
+    desktop_notify(f"Minecraft did not start.\n{message}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog=APP, description=f"{PRETTY} {VERSION}")
+    p.add_argument("-V", "--version", action="version", version=f"{PRETTY} {VERSION}")
+    sub = p.add_subparsers(dest="cmd")
+
+    sub.add_parser("gui", help="open the launcher (default)")
+    play = sub.add_parser("play", help="launch Minecraft")
+    play.add_argument("--editor", action="store_true",
+                      help="open Bedrock Editor instead of the game")
+    sp = sub.add_parser("setup", help="download & prepare Minecraft")
+    sp.add_argument("--mc", metavar="EDITION",
+                    help="Minecraft edition to install: release or preview")
+    sp.add_argument("--version", metavar="BUILD",
+                    help="Bedrock build to install (default: the newest); "
+                         "see 'versions'")
+    sp.add_argument("--beta", action="store_true", help="allow beta editions")
+    sp.add_argument("--force", action="store_true", help="re-download / rebuild")
+    lv = sub.add_parser("versions", help="list installable Minecraft builds")
+    lv.add_argument("--beta", action="store_true")
+    lv.add_argument(
+        "--installed", action="store_true",
+        help="list the builds downloaded on this machine and what they take "
+             "up, instead of what can be installed")
+    lv.add_argument(
+        "--remove", metavar="BUILD",
+        help="delete a downloaded build, by version or by folder; worlds, "
+             "settings and screenshots are kept")
+    lv.add_argument(
+        "--mc", metavar="EDITION",
+        help="which edition --remove means, when a build is installed for "
+             "more than one")
+    lv.add_argument(
+        "--refresh", action="store_true",
+        help="check Microsoft's build index again instead of using the "
+             "cached copy, which can be up to 12 hours old")
+    sub.add_parser("login", help="sign in to a Microsoft account")
+    sub.add_parser(
+        "store-login",
+        help=("link the Microsoft account that owns Minecraft, so it can be "
+              "downloaded from the Microsoft Store"),
+    )
+    ip = sub.add_parser("import",
+                        help=("import .mcpack/.mcaddon/.mcworld/.mctemplate/"
+                              ".mcskin"))
+    ip.add_argument("files", nargs="+", metavar="FILE",
+                    help="content file(s) to import")
+    sub.add_parser("repair", help="reset the Wine prefix")
+    dp = sub.add_parser("doctor", help="check host requirements")
+    dp.add_argument(
+        "--acknowledge-gpu-crash",
+        action="store_true",
+        help=("after repairing the graphics driver and rebooting, clear the "
+              "interrupted-launch safety block"),
+    )
+    dp.add_argument(
+        "--network",
+        action="store_true",
+        help="run read-only Xbox/Minecraft connectivity checks",
+    )
+    dp.add_argument(
+        "--host",
+        metavar="IP",
+        help="also inspect the route to a LAN host IP (implies --network)",
+    )
+    pp = sub.add_parser(
+        "profiles",
+        help="create or list isolated Xbox account profiles",
+    )
+    profiles_sub = pp.add_subparsers(dest="profiles_cmd")
+    profiles_create = profiles_sub.add_parser(
+        "create",
+        help="create an isolated profile and desktop shortcut",
+    )
+    profiles_create.add_argument("name", metavar="NAME")
+    profiles_sub.add_parser("list", help="list isolated profiles")
+    sc = sub.add_parser(
+        "shortcut",
+        help="create a desktop/Steam shortcut that launches Minecraft "
+             "directly, without the launcher window",
+    )
+    sc.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="launch an isolated profile instead of the default installation",
+    )
+    sub.add_parser("update", help="check for and install launcher updates")
+
+    sub.add_parser("changelog", help="display the launcher's release changelog history")
+
+    brtx = sub.add_parser(
+        "betterrtx", help="install or remove a BetterRTX shader preset")
+    brtx.add_argument("action", choices=("list", "install", "restore", "status"))
+    brtx.add_argument("target", nargs="?",
+                      help="for install: a preset name from `list`, or a "
+                           ".rtpack file")
+
+    a = p.parse_args()
+    try:
+        # Before anything is read or written: as root, it would be root's.
+        from .util import refuse_sudo
+        refuse_sudo()
+        # Migration must precede every write to the new XDG root.
+        from .util import _ensure_xdg_storage
+        _ensure_xdg_storage()
+        if a.cmd == "setup":
+            mc = None
+            if a.mc:
+                mc = next((v for v in list_editions(True)
+                           if v["id"] == a.mc.strip().lower()), None)
+                if not mc:
+                    die(f"Unknown Minecraft edition '{a.mc}'; expected "
+                        + " or ".join(v["id"] for v in list_editions(True))
+                        + ".")
+            do_setup(mc_edition=mc, mc_version=a.version, force=a.force)
+            ok(f"Done. Run:  {APP} play")
+        elif a.cmd == "play":
+            # Offline is a real way to play, so this warns and carries on --
+            # but it says so here rather than letting Realms, servers and
+            # friends come up missing in-game with nothing having mentioned
+            # a sign-in (#240).
+            if not msa_signed_in():
+                warn("Not signed in for online play: no Realms, no servers, "
+                     "no friends and no Marketplace.")
+                info(f"Sign in with:  {APP} login")
+            # A poweroff or a stopped scope with the game running lets the
+            # session finish its teardown before the launcher goes.
+            supervision.install()
+            problem = exit_problem(launch(editor=a.editor))
+            if problem:
+                warn(f"{problem} Its logs are in {LOGS}.")
+        elif a.cmd == "shortcut":
+            require_shortcuts_supported()
+            profile = create_profile(a.profile) if a.profile else None
+            entry = write_play_shortcut(
+                profile_name=a.profile, profile_dir=profile)
+            ok(f"Desktop shortcut: {entry}")
+            print("Steam command: " + play_launch_command(profile))
+            info("It starts Minecraft with no launcher window. Add it to "
+                 "Steam with 'Add a Non-Steam Game' to play it from the "
+                 "library, including Steam Deck Game Mode.")
+            # A profile's own installation state lives under its GOMCEIX_HOME.
+            for pending in ([] if profile else direct_launch_readiness()):
+                warn(pending)
+        elif a.cmd == "versions":
+            if a.remove:
+                _remove_installed_build(a.remove, a.mc)
+            elif a.installed:
+                _list_installed_builds()
+            else:
+                for edition in list_editions(a.beta):
+                    print(f"{edition['name']}  (--mc {edition['id']})")
+                    for build in list_versions(edition["id"],
+                                                ignore_cache=a.refresh):
+                        print(f"    {build['version']:<14}"
+                              f"{'installed' if build['installed'] else ''}")
+                info("Builds are downloaded from Microsoft's own CDN with "
+                     "your account, which must own Minecraft.")
+        elif a.cmd == "store-login":
+            from . import xodus as _xodus
+            if _xodus.signed_in():
+                ok("A Microsoft account is already linked for the download.")
+            else:
+                _xodus.login()
+        elif a.cmd == "login":
+            na = NativeAuth()
+            if na.signed_in():
+                ok("A Microsoft account is already linked.")
+            else:
+                na._flow(None, None)
+                if not na.signed_in():
+                    sys.exit(1)
+        elif a.cmd == "doctor":
+            system_healthy = doctor(a.acknowledge_gpu_crash)
+            network_healthy = True
+            if a.network or a.host:
+                network_healthy = _run_network_diagnostics(a.host)
+            sys.exit(0 if system_healthy and network_healthy else 1)
+        elif a.cmd == "profiles":
+            if a.profiles_cmd == "create":
+                require_profile_shortcuts_supported()
+                profile = create_profile(a.name)
+                shortcut = write_profile_shortcut(
+                    a.name,
+                    profile_dir=profile,
+                )
+                ok(f"Profile: {profile}")
+                ok(f"Desktop shortcut: {shortcut}")
+                print("Steam command: " + profile_launch_command(profile))
+            elif a.profiles_cmd == "list":
+                profiles = list_profiles()
+                if not profiles:
+                    info("No isolated profiles.")
+                for profile in profiles:
+                    print(
+                        f"  {profile['name']} ({profile['slug']}): "
+                        f"{profile['path']}"
+                    )
+            else:
+                pp.print_help()
+        elif a.cmd == "update":
+            try:
+                rel = check_for_update()
+            except Exception as e:
+                die(f"Could not check for updates: {e}")
+            if not rel:
+                ok(f"{PRETTY} {VERSION} is up to date.")
+            else:
+                info(f"Update available: v{rel['version']} "
+                     f"(you have {VERSION}).")
+                go = (update_kind() in ("git", "system") or not IS_TTY
+                      or input(f"Install v{rel['version']} now? [y/N] ")
+                      .strip().lower() == "y")
+                if go:
+                    state, msg = self_update(rel)
+                    (ok if state == "ok" else warn)(msg)
+                else:
+                    info("Update skipped.")
+        elif a.cmd == "import":
+            cmd_import(a.files)
+        elif a.cmd == "repair":
+            reset_prefix()
+        elif a.cmd == "betterrtx":
+            from .betterrtx import cli as betterrtx_cli
+            if a.action == "install" and not a.target:
+                p.error("betterrtx install needs a preset name or a .rtpack")
+            betterrtx_cli(a.action, a.target)
+        elif a.cmd == "changelog":
+            try:
+                from .util import gh_latest
+                from .config import SELF_REPO
+                rel = gh_latest(SELF_REPO)
+                if not rel:
+                    print("No release found.")
+                    return
+                tag = rel.get("tag_name", "Unknown")
+                date = (rel.get("published_at") or "").split("T")[0]
+                body = rel.get("body") or ""
+                print(f"Release {tag} ({date})")
+                print("-" * (len(tag) + len(date) + 11))
+                print(body.strip())
+            except Exception as e:
+                die(f"Error fetching changelog: {e}")
+        elif a.cmd == "gui":
+            _open_gui()
+        else:
+            if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+                _open_gui()
+            else:
+                p.print_help()
+    except BolError as exc:
+        from .xodus import NotSignedIn
+        if not getattr(exc, "reported", False):
+            err(str(exc))
+        if isinstance(exc, NotSignedIn):
+            # The download's own account link, which the GUI offers with a
+            # button. Name the command that does it rather than leaving the
+            # terminal with a sign-in it cannot start.
+            info(f"Sign in with:  {APP} store-login")
+        if a.cmd == "play":
+            _report_launch_failure(str(exc))
+        sys.exit(1)

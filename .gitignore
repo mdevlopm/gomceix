@@ -1,0 +1,17 @@
+dist/
+build/
+.flatpak-builder/
+flatpak/.*.resolved.yml
+*.part
+*.gomceix-orig
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+.claude/
+.venv/
+.pytest_cache/
+result
+result-*
+.direnv
+agent-work/

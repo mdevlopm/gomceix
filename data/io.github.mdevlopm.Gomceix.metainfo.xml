@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mdevlopm.Gomceix</id>
+  <name>Gomceix</name>
+  <summary>Bedrock launcher for GNOME</summary>
+  <developer id="io.github.mdevlopm">
+    <name>mdevlopm</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Gomceix is a GNOME-style launcher for Minecraft Bedrock Edition on Linux. It downloads the game from the Microsoft Store with your own account, sets up everything the game needs, and starts it.</p>
+    <p>Features:</p>
+    <ul>
+      <li>Install and manage game versions, accounts, profiles, worlds and content</li>
+      <li>Real Xbox sign-in, so friends, servers and Realms work from inside the game</li>
+      <li>Light, dark and custom JSON themes, and a picture behind the Play banner</li>
+      <li>Requirements page that lists every component Gomceix downloads, each removable on its own</li>
+      <li>Diagnostics for your GPU and the game's Wine prefix</li>
+      <li>English, Turkish and Chinese interface, switchable at runtime</li>
+    </ul>
+    <p>Gomceix does not contain or distribute Minecraft. A Minecraft licence linked to your Microsoft account is required. Gomceix is not affiliated with Mojang or Microsoft.</p>
+  </description>
+  <launchable type="desktop-id">io.github.mdevlopm.Gomceix.desktop</launchable>
+  <url type="homepage">https://github.com/mdevlopm/gomceix</url>
+  <url type="vcs-browser">https://github.com/mdevlopm/gomceix</url>
+  <!--
+    Screenshots: none yet. AppStore screenshots must be fetched from a public
+    https URL, and there is no hosted copy to point at, so no <screenshots>
+    element is declared rather than a fake link. Add one (default="true",
+    16:9, with a <caption>) once a screenshot is published in the repository.
+  -->
+  <categories>
+    <category>Game</category>
+  </categories>
+  <keywords>
+    <keyword>Minecraft</keyword>
+    <keyword>Bedrock</keyword>
+    <keyword>Launcher</keyword>
+    <keyword>Wine</keyword>
+    <keyword>Proton</keyword>
+  </keywords>
+  <provides>
+    <binary>gomceix</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <supports>
+    <control>gamepad</control>
+    <control>touch</control>
+  </supports>
+  <!-- The launcher itself has no content. The game it starts is rated by its publisher. -->
+  <content_rating type="oars-1.1"/>
+  <branding>
+    <color type="primary" scheme_preference="light">#6aa9ff</color>
+    <color type="primary" scheme_preference="dark">#3b4cca</color>
+  </branding>
+  <releases>
+    <release version="0.1.0" date="2026-10-29">
+      <description>
+        <p>First release.</p>
+        <ul>
+          <li>New GTK 4 and libadwaita interface with themes and backgrounds</li>
+          <li>Game download, sign-in, profiles, saves and content management</li>
+          <li>Flatpak packaging</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

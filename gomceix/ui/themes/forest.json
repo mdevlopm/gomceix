@@ -1,0 +1,5 @@
+{ "schema": 1, "id": "forest", "name": "Forest", "scheme": "dark",
+  "colors": { "accent": "#43b581", "window": "#101a16", "card": "#18271f", "header": "#0d1511",
+              "sidebar": "#0b120f", "popover": "#18271f", "fg": "#e6f2ec",
+              "success": "#57c785", "warning": "#e5a50a", "error": "#f66151" },
+  "shape": { "radius": 18, "spacing": 12 } }

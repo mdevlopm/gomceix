@@ -1,0 +1,98 @@
+# Build the release artifacts when a version tag is pushed, and attach them to a
+# DRAFT GitHub release for a person to review and publish. Nothing is published
+# to PyPI, and nothing but the automatic GITHUB_TOKEN is used.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: The tag must name the package version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' gomceix/__init__.py)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match gomceix.__version__ $version" >&2
+            exit 1
+          fi
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 python3-venv python3-gi gir1.2-gtk-4.0 \
+            gir1.2-adw-1 shellcheck
+      - name: Windows helper programs (mingw-w64, from src/*.c)
+        run: bash scripts/build-helpers.sh --all
+      - name: Python environment
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --quiet --disable-pip-version-check \
+            pytest ruff cryptography python-xlib setuptools build twine
+      - name: Lint and tests
+        run: |
+          .venv/bin/ruff check --select F gomceix tests
+          shellcheck -x scripts/*.sh
+          .venv/bin/python -m pytest -q
+      - name: sdist and wheel
+        run: PYTHON="$PWD/.venv/bin/python" bash scripts/build-dist.sh --out dist
+      - name: Clean-environment install test
+        run: bash scripts/smoke-installed.sh --no-gui dist/gomceix-*.whl
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum gomceix-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: |
+            dist/gomceix-*
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  # No Flatpak bundle is built here: a release carries only the artifacts above.
+  # packaging/flatpak/README.md builds one from the source tree.
+
+  draft-release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write          # create the draft release; the only write grant
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release/
+      - name: Attach the artifacts to a draft release
+        run: |
+          ls -l release
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Re-run of a tag: only ever touch a release that is still a draft.
+            draft=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+            if [ "$draft" != true ]; then
+              echo "release $GITHUB_REF_NAME is already published; not modifying it" >&2
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" release/* --draft --verify-tag \
+              --title "Gomceix ${GITHUB_REF_NAME#v}" --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi

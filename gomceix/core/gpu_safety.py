@@ -1,0 +1,1121 @@
+"""Fail-closed graphics checks which never open a GPU device.
+
+The launcher must not call Vulkan/OpenGL merely to decide whether Vulkan is
+safe: on a broken proprietary driver, that probe itself can panic the kernel.
+Everything here is obtained from the existing X server, sysfs, or text logs.
+"""
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Optional
+
+from .config import GAMES, WINEGDK_BUILD_REV
+from .log import BolError, die, warn
+from .util import env_flag, launcher_command, steam_app_id
+
+
+try:
+    # ``games`` is shared by isolated profiles. Following that link back to
+    # its parent keeps the interlock global to every profile while preserving
+    # the normal and relocated main-data roots.
+    _GPU_STATE_ROOT = GAMES.resolve(strict=False).parent
+except (OSError, RuntimeError) as exc:
+    raise BolError(
+        f"Cannot locate the shared GPU-safety state directory: {exc}"
+    ) from exc
+
+GPU_LAUNCH_MARKER = _GPU_STATE_ROOT / ".gpu-launch-in-progress.json"
+GPU_SAFETY_ACK = _GPU_STATE_ROOT / ".gpu-safety-ack.json"
+_STATE_VERSION = 2
+_LEGACY_MARKER_VERSION = 1
+
+
+@dataclass(frozen=True)
+class GpuSafetyAcknowledgementStatus:
+    code: str
+    can_acknowledge: bool
+    message: str
+    marker_present: bool = False
+    previous_boot_fault: bool = False
+
+
+def acknowledge_gpu_crash_command() -> str:
+    """The acknowledgement command line for the running installation."""
+    return launcher_command("doctor", "--acknowledge-gpu-crash")
+
+
+def unsafe_gpu_override_command(
+        environ: Optional[Mapping[str, str]] = None) -> str:
+    """A command line that starts this installation with the override set.
+
+    The variable has to reach the launcher's own process. The Advanced
+    custom-environment setting only reaches the game, and the bare
+    "GOMCEIX_ALLOW_UNSAFE_GPU=1" this message used to end on is a shell
+    assignment that reached no program at all (#301). ``env`` rather than a
+    shell assignment: it means the same in every shell. ``flatpak run``
+    passes the caller's environment on, but ``--env`` says it explicitly.
+    """
+    command = launcher_command(environ=environ)
+    flatpak = "flatpak run "
+    if command.startswith(flatpak):
+        return (flatpak + "--env=GOMCEIX_ALLOW_UNSAFE_GPU=1 "
+                + command[len(flatpak):])
+    return "env GOMCEIX_ALLOW_UNSAFE_GPU=1 " + command
+
+
+def _steam_shortcut_override_hint(env: Mapping[str, str]) -> str:
+    """Where the override goes when Steam starts the launcher.
+
+    Steam takes a shortcut's Target as one program path: a Target of
+    "env GOMCEIX_ALLOW_UNSAFE_GPU=1 <launcher>" names a file that does not
+    exist, and nothing starts. The variable belongs in the launch options,
+    in front of %command%. Only said when Steam started this launcher.
+    """
+    if not steam_app_id(env):
+        return ""
+    return (" In a Steam shortcut, keep Target as the program alone and "
+            "start its launch options with 'GOMCEIX_ALLOW_UNSAFE_GPU=1 "
+            "%command%' (for example 'GOMCEIX_ALLOW_UNSAFE_GPU=1 %command% "
+            "play'); take it out again after that start.")
+
+
+class InterruptedLaunchProblem(str):
+    """A refusal that comes from the interrupted-launch marker.
+
+    It reads as the plain message everywhere. require_safe_graphics_session
+    tells it apart from a driver or display fault, whose advice (repair the
+    driver, reboot) does not fit a game that was open at shutdown.
+    """
+
+
+def _x11_session(env: Mapping[str, str]) -> bool:
+    session = (env.get("XDG_SESSION_TYPE") or "").strip().lower()
+    if session:
+        return session == "x11"
+    return bool(env.get("DISPLAY")) and not bool(env.get("WAYLAND_DISPLAY"))
+
+
+# Root-window properties that steamcompmgr itself writes on the Xwayland
+# server it runs. GAMESCOPECTRL_* and the other GAMESCOPE* names are a control
+# channel that the Steam client writes on whatever display it is on, an
+# ordinary desktop included, and they stay on the root until that X server
+# exits. Matching those took a KDE or GNOME desktop that had run Steam for a
+# Game Mode session and hid the launcher whenever the game started (#293).
+_GAMESCOPE_COMPOSITOR_ATOMS = frozenset({
+    b"GAMESCOPE_FOCUSABLE_APPS",
+    b"GAMESCOPE_FOCUSABLE_WINDOWS",
+    b"GAMESCOPE_FOCUSED_APP",
+    b"GAMESCOPE_FOCUSED_APP_GFX",
+    b"GAMESCOPE_FOCUSED_WINDOW",
+    b"GAMESCOPE_XWAYLAND_SERVER_ID",
+})
+
+
+def _gamescope_root_atoms(env: Mapping[str, str]) -> bool:
+    """True when the X display's root window carries Gamescope's own atoms.
+
+    The compositor identifies itself on the root window of the Xwayland server
+    it runs (see _GAMESCOPE_COMPOSITOR_ATOMS). This is protocol only: it opens
+    no GPU, exactly like the RandR probe beside it.
+
+    Reading them matters because the environment is not a reliable witness. A
+    Flatpak sandbox does not forward ``GAMESCOPE_WAYLAND_DISPLAY``, so in Steam
+    Deck Game Mode the packaged launcher saw an ordinary X11 session reporting
+    zero RandR providers and refused to start, while the AppImage on the same
+    Deck was fine. Connecting an external monitor made a provider appear and
+    was the only known way out (issue #127).
+    """
+
+    if not (env.get("DISPLAY") or "").strip():
+        return False
+    try:
+        import ctypes
+
+        xlib = ctypes.cdll.LoadLibrary("libX11.so.6")
+        xlib.XOpenDisplay.restype = ctypes.c_void_p
+        xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        xlib.XDefaultRootWindow.restype = ctypes.c_ulong
+        xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        xlib.XListProperties.restype = ctypes.POINTER(ctypes.c_ulong)
+        xlib.XListProperties.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_int)]
+        xlib.XGetAtomName.restype = ctypes.c_void_p
+        xlib.XGetAtomName.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        xlib.XFree.argtypes = [ctypes.c_void_p]
+        xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    except (OSError, AttributeError):
+        return False
+
+    display = xlib.XOpenDisplay(str(env["DISPLAY"]).encode())
+    if not display:
+        return False
+    display = ctypes.c_void_p(display)
+    try:
+        count = ctypes.c_int(0)
+        atoms = xlib.XListProperties(
+            display, xlib.XDefaultRootWindow(display), ctypes.byref(count))
+        if not atoms:
+            return False
+        try:
+            for index in range(count.value):
+                name = xlib.XGetAtomName(display, atoms[index])
+                if not name:
+                    continue
+                try:
+                    if ctypes.string_at(name) in _GAMESCOPE_COMPOSITOR_ATOMS:
+                        return True
+                finally:
+                    xlib.XFree(ctypes.c_void_p(name))
+        finally:
+            xlib.XFree(ctypes.cast(atoms, ctypes.c_void_p))
+    except Exception:
+        return False
+    finally:
+        xlib.XCloseDisplay(display)
+    return False
+
+
+def _nested_gamescope_session(env: Mapping[str, str], atom_probe=None) -> bool:
+    """True only for an explicitly identified nested Gamescope session.
+
+    Gamescope's Xwayland server legitimately reports zero RandR providers even
+    while the compositor is presenting through a healthy DRM/Vulkan device.
+    Generic Steam or Steam Deck flags are deliberately insufficient: they can
+    also be present on an ordinary direct-Xorg desktop, where zero providers
+    remains a useful failure signal.
+
+    The environment is checked first because it costs nothing; the root-window
+    atoms are what still identify the session once a sandbox has dropped those
+    variables.
+    """
+
+    if (env.get("GAMESCOPE_WAYLAND_DISPLAY") or "").strip():
+        return True
+    for key in ("XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP",
+                "DESKTOP_SESSION"):
+        value = (env.get(key) or "").strip().lower()
+        parts = re.split(r"[:;,\s]+", value)
+        if any(part == "gamescope" or part.startswith("gamescope-")
+               for part in parts):
+            return True
+    probe = _gamescope_root_atoms if atom_probe is None else atom_probe
+    return bool(probe(env))
+
+
+def in_gamescope_session(environ: Optional[Mapping[str, str]] = None,
+                         atom_probe=None) -> bool:
+    """Whether this process is running inside a nested Gamescope session.
+
+    Steam Game Mode is the case that matters to callers: it shows one
+    application window at a time, so a launcher window there stands between
+    Steam and the game.
+    """
+    env = os.environ if environ is None else environ
+    return _nested_gamescope_session(env, atom_probe)
+
+
+def _xrandr_provider_count(env: Mapping[str, str], runner=None) -> Optional[int]:
+    binary = shutil.which("xrandr")
+    # Supplying a runner is the unit-test seam; it must not depend on whether
+    # the test host happens to install xrandr.
+    if not binary and runner is not None:
+        binary = "xrandr"
+    if not binary:
+        return None
+    runner = runner or subprocess.run
+    try:
+        result = runner(
+            [binary, "--listproviders"],
+            env=dict(env),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=4,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    match = re.search(r"Providers:\s*number\s*:\s*(\d+)",
+                      getattr(result, "stdout", ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _randr_provider_count(env: Mapping[str, str]) -> Optional[int]:
+    """The X server's RandR provider count, asked through libXrandr.
+
+    It is the request ``xrandr --listproviders`` makes, for systems that have
+    the library but not that program. The Flatpak's GNOME runtime is one:
+    without this, the packaged launcher could verify a provider on no X11
+    session at all, so a healthy desktop was refused, and Steam Deck Game Mode
+    never reached the Gamescope exemption, which only a counted zero gets
+    (#259). Protocol only, like the root-window probe: it opens no GPU.
+    """
+
+    display_name = (env.get("DISPLAY") or "").strip()
+    if not display_name:
+        return None
+    try:
+        import ctypes
+
+        class ProviderResources(ctypes.Structure):
+            _fields_ = [("timestamp", ctypes.c_ulong),
+                        ("nproviders", ctypes.c_int),
+                        ("providers", ctypes.POINTER(ctypes.c_ulong))]
+
+        xlib = ctypes.cdll.LoadLibrary("libX11.so.6")
+        xrandr = ctypes.cdll.LoadLibrary("libXrandr.so.2")
+        xlib.XOpenDisplay.restype = ctypes.c_void_p
+        xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        xlib.XDefaultRootWindow.restype = ctypes.c_ulong
+        xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        two_ints = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+                    ctypes.POINTER(ctypes.c_int)]
+        xrandr.XRRQueryExtension.argtypes = two_ints
+        xrandr.XRRQueryVersion.argtypes = two_ints
+        xrandr.XRRGetProviderResources.restype = ctypes.POINTER(
+            ProviderResources)
+        xrandr.XRRGetProviderResources.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong]
+        xrandr.XRRFreeProviderResources.argtypes = [
+            ctypes.POINTER(ProviderResources)]
+    except (OSError, AttributeError):
+        return None
+
+    display = xlib.XOpenDisplay(display_name.encode())
+    if not display:
+        return None
+    display = ctypes.c_void_p(display)
+    try:
+        major, minor = ctypes.c_int(0), ctypes.c_int(0)
+        if not xrandr.XRRQueryExtension(
+                display, ctypes.byref(major), ctypes.byref(minor)):
+            return None
+        if not xrandr.XRRQueryVersion(
+                display, ctypes.byref(major), ctypes.byref(minor)):
+            return None
+        # Providers arrived in RandR 1.4. An older server answers the request
+        # with an X error, and Xlib's default handler exits the process.
+        if (major.value, minor.value) < (1, 4):
+            return None
+        resources = xrandr.XRRGetProviderResources(
+            display, xlib.XDefaultRootWindow(display))
+        if not resources:
+            return None
+        try:
+            return max(0, int(resources.contents.nproviders))
+        finally:
+            xrandr.XRRFreeProviderResources(resources)
+    except Exception:
+        return None
+    finally:
+        xlib.XCloseDisplay(display)
+
+
+def _boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _sync_parent(path: Path) -> None:
+    try:
+        fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_state(path: Path) -> Optional[dict]:
+    """Read a small regular JSON state file, rejecting links/oversized data."""
+
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        with path.open("r", encoding="utf-8") as stream:
+            raw = stream.read(65_537)
+    except (OSError, UnicodeError):
+        return None
+    if len(raw) > 65_536:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_state_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    staged = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(staged, 0o600)
+        os.replace(staged, path)
+        _sync_parent(path)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def _pid_alive(pid) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _process_start(pid) -> Optional[int]:
+    """When ``pid`` started, in clock ticks after boot, or None if unknown."""
+    try:
+        line = Path(f"/proc/{pid}/stat").read_text(errors="replace")
+    except OSError:
+        return None
+    # Field 22. The command name before it is parenthesised and may itself
+    # hold spaces or parentheses, so count from the last ')'.
+    fields = line.rpartition(")")[2].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def _launcher_alive(state: dict) -> bool:
+    """Whether the launcher that wrote a marker is still running.
+
+    Its PID alone does not say. A Flatpak or a container starts every
+    session in a PID namespace of its own, so the launcher of the next
+    session tends to get the very PID the previous one recorded -- it can
+    be the process asking -- and a launch whose launcher was killed with
+    its container read as one still running, to be closed or force-stopped
+    although nothing was left to stop (#299). Markers record the process's
+    start time too; one written before that keeps the PID-only answer.
+    """
+    pid = state.get("launcher_pid")
+    if not _pid_alive(pid):
+        return False
+    if "launcher_start" not in state:
+        # Written by an older launcher: this process would have recorded
+        # its start time, so its own PID there can only be a recycled one.
+        return pid != os.getpid()
+    started = state.get("launcher_start")
+    if started is None:
+        return True
+    return _process_start(pid) == started
+
+
+def interrupted_launch_problem(path: Optional[Path] = None) -> Optional[str]:
+    """Describe a launch which never returned to the launcher.
+
+    Presence is authoritative even if the JSON was torn by a power loss.  This
+    is deliberately conservative: a stale marker is removed only by the
+    explicit doctor acknowledgement after a reboot and inspection.
+    """
+
+    marker = Path(path) if path is not None else GPU_LAUNCH_MARKER
+    command = acknowledge_gpu_crash_command()
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return (
+            "the launcher cannot inspect its persistent GPU safety marker; "
+            f"repair the data-directory permissions, then run '{command}'"
+        )
+    state = _read_state(marker)
+    if not state:
+        # The acknowledgement cannot vouch for a record it cannot read, so
+        # it is not the way out here (#299).
+        return (
+            "an interrupted Minecraft launch marker exists but is unreadable; "
+            "once the graphics driver works, remove "
+            f"'{marker}', or start once with GOMCEIX_ALLOW_UNSAFE_GPU=1"
+        )
+    if state.get("version") == _LEGACY_MARKER_VERSION:
+        # Schema 1 predates the durable wrapper-return phase. It cannot prove
+        # whether Wine merely crashed in userspace (as in issue #31) or the GPU
+        # session contributed to a hard lock, so never delete it implicitly.
+        same_boot = bool(_boot_id() and state.get("boot_id") == _boot_id())
+        if same_boot and _launcher_alive(state):
+            return (
+                "a legacy Minecraft GPU session is still marked active in "
+                "this launcher; close or force-stop it instead of starting a "
+                "second session"
+            )
+        when = ("during this boot" if same_boot
+                else "before the last reboot/power loss")
+        return (
+            f"a legacy Minecraft GPU session did not return cleanly {when}; "
+            "the old marker cannot distinguish a Wine crash from a graphics-"
+            "driver failure, so after checking the driver and rebooting run "
+            f"'{command}' once to acknowledge it"
+        )
+    if state.get("version") != _STATE_VERSION:
+        return (
+            "an interrupted Minecraft launch marker has an unsupported format; "
+            "once the graphics driver works, remove "
+            f"'{marker}', or start once with GOMCEIX_ALLOW_UNSAFE_GPU=1"
+        )
+    same_boot = bool(_boot_id() and state.get("boot_id") == _boot_id())
+    if same_boot and _launcher_alive(state):
+        return (
+            "a Minecraft GPU session is still marked active in this launcher; "
+            "close or force-stop it instead of starting a second session"
+        )
+    if same_boot:
+        # PLAY retires this marker itself (retire_idle_current_boot_marker),
+        # so the acknowledgement is not the next step for it.
+        return (
+            "the previous Minecraft GPU session did not return cleanly during "
+            "this boot; once nothing of that session is left running, the "
+            "next PLAY clears this record by itself — reboot first if the "
+            "screen froze or the graphics misbehaved"
+        )
+    # This is already a new boot: "reboot before retrying" was no advice.
+    return (
+        "the previous Minecraft GPU session did not return cleanly before the "
+        "last reboot/power loss, as when the computer is shut down with "
+        "Minecraft still open; if the screen froze or the computer had to be "
+        "forced off, repair the graphics driver first; otherwise run "
+        f"'{command}' once to acknowledge the interrupted launch"
+    )
+
+
+def _replace_marker_under_override(marker: Path) -> None:
+    """Remove the marker an overridden launch would otherwise stop at.
+
+    GOMCEIX_ALLOW_UNSAFE_GPU=1 let require_safe_graphics_session through, and
+    then arming this launch's own marker met the old one and refused anyway:
+    the documented override could never get past an interrupted launch,
+    which is what it was being used for ("even the env does not work").
+    It is replaced here, at the moment this launch records its own, so a
+    launch that fails before the game starts leaves the incident as it was.
+    The caller holds the launch lock and proved the prefix idle, so no
+    session can still own it.
+    """
+    try:
+        info = marker.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise BolError(
+            f"The GPU safety marker '{marker}' cannot be inspected ({exc})."
+        ) from exc
+    if stat.S_ISDIR(info.st_mode):
+        raise BolError(
+            f"The GPU safety marker '{marker}' is a directory; remove it by "
+            "hand.")
+    state = _read_state(marker) or {}
+    if not state:
+        what = "an unreadable record"
+    else:
+        boot = _boot_id()
+        when = ("this boot" if boot and state.get("boot_id") == boot
+                else "an earlier boot")
+        what = f"a record from {when} (phase {state.get('phase', 'unknown')})"
+    marker.unlink()
+    _sync_parent(marker)
+    warn("GOMCEIX_ALLOW_UNSAFE_GPU=1: replaced the interrupted Minecraft launch "
+         f"marker ({what}) with this launch's own. This start is at your "
+         "own risk.")
+
+
+def arm_gpu_launch(path: Optional[Path] = None,
+                   environ: Optional[Mapping[str, str]] = None) -> str:
+    """Durably mark a GPU launch immediately before spawning its process.
+
+    Without the override, an existing marker refuses the launch. With
+    GOMCEIX_ALLOW_UNSAFE_GPU=1, it is replaced by this launch's own.
+    """
+
+    marker = Path(path) if path is not None else GPU_LAUNCH_MARKER
+    env = os.environ if environ is None else environ
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(16)
+    payload = {
+        "version": _STATE_VERSION,
+        "engine_rev": WINEGDK_BUILD_REV,
+        "phase": "running",
+        "token": token,
+        "boot_id": _boot_id(),
+        "launcher_pid": os.getpid(),
+        "launcher_start": _process_start(os.getpid()),
+        "created": int(time.time()),
+    }
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    try:
+        if env_flag(env.get("GOMCEIX_ALLOW_UNSAFE_GPU")):
+            _replace_marker_under_override(marker)
+        fd = os.open(marker, flags, 0o600)
+    except FileExistsError as exc:
+        raise BolError(
+            "A previous Minecraft GPU launch is still marked interrupted. "
+            "After inspecting the interrupted session and rebooting, run "
+            f"'{acknowledge_gpu_crash_command()}' if no current graphics "
+            "fault remains."
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(marker, 0o600)
+        _sync_parent(marker)
+    except Exception:
+        marker.unlink(missing_ok=True)
+        raise
+    return token
+
+
+def disarm_gpu_launch(token: str, path: Optional[Path] = None) -> bool:
+    """Clear only the marker owned by a GPU process which returned normally."""
+
+    marker = Path(path) if path is not None else GPU_LAUNCH_MARKER
+    state = _read_state(marker)
+    if not state or not secrets.compare_digest(str(state.get("token", "")), token):
+        return False
+    try:
+        marker.unlink()
+    except OSError:
+        return False
+    _sync_parent(marker)
+    return True
+
+
+def mark_gpu_wrapper_returned(
+        token: str, path: Optional[Path] = None) -> bool:
+    """Persist that UMU returned before checking Wine's final teardown."""
+
+    marker = Path(path) if path is not None else GPU_LAUNCH_MARKER
+    state = _read_state(marker)
+    if (not state or state.get("version") != _STATE_VERSION
+            or state.get("phase") != "running"
+            or not secrets.compare_digest(str(state.get("token", "")), token)):
+        return False
+    payload = dict(state)
+    payload["phase"] = "wrapper_returned"
+    payload["wrapper_returned"] = int(time.time())
+    try:
+        _write_state_atomic(marker, payload)
+    except OSError:
+        return False
+    return True
+
+
+def retire_idle_current_boot_marker(path: Optional[Path] = None) -> bool:
+    """Clear an orphan marker only after the caller proved the prefix idle.
+
+    UMU can return just before Wine's last helper or wineserver finishes its
+    normal shutdown.  If that exceeds the launcher's grace period, retaining
+    the marker is correct while those processes are live but must not turn
+    into a permanent same-boot block after the prefix has stopped. The launch
+    lock and idle-prefix check are owned by the caller.
+
+    A marker left "running" goes too once the launcher that wrote it is gone:
+    one killed with its terminal, its Flatpak or its container while the game
+    ran. Nothing of that session is left -- the caller holds the launch lock,
+    which the game's wrapper keeps for as long as it runs, and found the
+    prefix idle -- and the machine never stopped, since this is the same
+    boot. It used to block every launch until a reboot, which is what made a
+    Guix container user delete the marker by hand (#299). An old-boot marker,
+    a running marker whose launcher is still alive, malformed state, and
+    token races remain untouched. Kernel, journal, and display-provider
+    checks still run immediately after this recovery.
+    """
+
+    marker = Path(path) if path is not None else GPU_LAUNCH_MARKER
+    state = _read_state(marker)
+    if not state or state.get("version") != _STATE_VERSION:
+        return False
+    phase = state.get("phase")
+    expected_fields = {
+        "version", "engine_rev", "phase", "token", "boot_id",
+        "launcher_pid", "created",
+    }
+    if phase == "wrapper_returned":
+        expected_fields.add("wrapper_returned")
+    elif phase != "running":
+        return False
+    # Markers written before the launcher's start time was recorded lack it.
+    if set(state) - {"launcher_start"} != expected_fields:
+        return False
+    launcher_start = state.get("launcher_start")
+    if launcher_start is not None and (
+            isinstance(launcher_start, bool)
+            or not isinstance(launcher_start, int) or launcher_start < 0):
+        return False
+    boot = _boot_id()
+    if not boot or state.get("boot_id") != boot:
+        return False
+    pid = state.get("launcher_pid")
+    created = state.get("created")
+    wrapper_returned = state.get("wrapper_returned")
+    engine_rev = state.get("engine_rev")
+    token = state.get("token")
+    if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1
+            or isinstance(created, bool) or not isinstance(created, int)
+            or created < 0 or not isinstance(engine_rev, str)
+            or not engine_rev or not isinstance(token, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", token)):
+        return False
+    if phase == "wrapper_returned":
+        if (isinstance(wrapper_returned, bool)
+                or not isinstance(wrapper_returned, int)
+                or wrapper_returned < created):
+            return False
+    elif _launcher_alive(state):
+        return False
+    if not disarm_gpu_launch(token, marker):
+        return False
+    if phase == "wrapper_returned":
+        warn(
+            "Removed an orphaned current-boot GPU marker after confirming the "
+            "Wine prefix is idle; kernel and display-server safety checks "
+            "still apply."
+        )
+    else:
+        warn(
+            "Cleared the record of a Minecraft session whose launcher stopped "
+            "during this boot while the game ran (closed with its terminal, "
+            "Flatpak or container): nothing of it is left running. Kernel "
+            "and display-server safety checks still apply."
+        )
+    return True
+
+
+def _acknowledgement_marker_scope(marker: Path) -> str:
+    """Classify a marker as none/previous/current/active/unknown."""
+
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return "none"
+    except OSError:
+        return "unknown"
+    state = _read_state(marker)
+    boot = _boot_id()
+    marker_boot = state.get("boot_id") if state else None
+    if not boot or not isinstance(marker_boot, str) or not marker_boot:
+        return "unknown"
+    if marker_boot != boot:
+        return "previous"
+    if _launcher_alive(state):
+        return "active"
+    return "current"
+
+
+def acknowledge_gpu_safety_incident(
+        marker_path: Optional[Path] = None,
+        ack_path: Optional[Path] = None,
+        journal_runner=None) -> GpuSafetyAcknowledgementStatus:
+    """Acknowledge one verified previous-boot incident, never a blank state.
+
+    The caller must serialize this with PLAY (the doctor command uses the same
+    launch lock). Eligibility is re-evaluated immediately before the durable
+    write, so a current-boot launch marker or kernel fault cannot be cleared.
+    """
+
+    marker = Path(marker_path) if marker_path is not None else GPU_LAUNCH_MARKER
+    ack = Path(ack_path) if ack_path is not None else GPU_SAFETY_ACK
+    status = gpu_safety_acknowledgement_status(marker, journal_runner)
+    if not status.can_acknowledge:
+        raise BolError(status.message)
+    _write_state_atomic(ack, {
+        "version": _STATE_VERSION,
+        "boot_id": _boot_id(),
+        "acknowledged": int(time.time()),
+        "marker": status.marker_present,
+        "previous_boot_fault": status.previous_boot_fault,
+    })
+    if status.marker_present:
+        try:
+            marker.unlink()
+        except OSError:
+            # Leaving the marker in place remains fail-closed. The caller can
+            # report the filesystem error instead of pretending it was clear.
+            raise BolError(
+                "The previous-boot GPU incident was acknowledged, but its "
+                "interrupted-launch marker could not be removed."
+            )
+        _sync_parent(marker)
+    return status
+
+
+def _previous_boot_fault_acknowledged(path: Optional[Path] = None) -> bool:
+    ack = Path(path) if path is not None else GPU_SAFETY_ACK
+    state = _read_state(ack)
+    boot = _boot_id()
+    return bool(boot and state and state.get("version") == _STATE_VERSION
+                and state.get("boot_id") == boot
+                and state.get("previous_boot_fault") is True)
+
+
+def _xorg_software_fallback() -> bool:
+    """Best-effort confirmation when RandR is unavailable.
+
+    Require several independent markers to avoid rejecting a healthy session
+    because an old log merely mentioned fbdev during driver discovery.
+    """
+
+    candidates = (
+        Path.home() / ".local/share/xorg/Xorg.0.log",
+        Path("/var/log/Xorg.0.log"),
+    )
+    for path in candidates:
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            continue
+        if ("FBDEV(0):" in text
+                and "DRISWRAST GL provider" in text
+                and "Failed to open DRM device" in text):
+            return True
+    return False
+
+
+def _nvidia_device_with_mesa_glx() -> bool:
+    """Recognise Debian/Mint's particularly dangerous split-driver state."""
+
+    nvidia = False
+    for vendor_path in Path("/sys/class/drm").glob("card*/device/vendor"):
+        try:
+            vendor = vendor_path.read_text().strip().lower()
+            driver = vendor_path.parent.joinpath("driver").resolve().name
+        except OSError:
+            continue
+        if vendor == "0x10de" and driver == "nvidia":
+            nvidia = True
+            break
+    if not nvidia:
+        return False
+    try:
+        target = os.readlink("/etc/alternatives/glx")
+    except OSError:
+        return False
+    return "mesa-diverted" in target
+
+
+def _gpu_fault_in_text(text: str) -> bool:
+    """Recognise a kernel GPU failure without conflating unrelated messages."""
+
+    lines = text.lower().splitlines()
+    direct = (
+        re.compile(r"\bnvrm:.*gpu has fallen off the bus"),
+        re.compile(r"\bnvrm:.*\bxid\b.*\b(?:79|119|120)\b"),
+        re.compile(r"\bamdgpu\b.*(?:gpu reset begin|ring\s+\S+\s+timeout|"
+                   r"asic reset failed|gpu fault)"),
+        # Not a bare "GPU HANG": i915 logs one for every hang, then resets
+        # the engine or the whole GPU and carries on. A reset that fails
+        # leaves the GPU wedged, and that is the fault; see
+        # _recovered_gpu_hang_in_text for the rest (#301).
+        re.compile(r"\b(?:i915|xe)\b.*(?:wedged|reset.*failed|"
+                   r"failed to reset)"),
+    )
+    if any(pattern.search(line) for line in lines for pattern in direct):
+        return True
+
+    # Kernel oops/lockup headers and the responsible module are frequently on
+    # different stack-trace lines. Correlate them in a small neighbourhood;
+    # seeing routine "amdgpu" boot chatter and an unrelated network-driver oops
+    # somewhere else in a large journal must not blame the GPU.
+    generic = re.compile(
+        r"bug:\s*kernel null pointer dereference|"
+        r"watchdog.*(?:hard|soft)\s+lockup|"
+        r"kernel panic|general protection fault"
+    )
+    # "traps: wineserver[4242] general protection fault ip:… in libc.so.6"
+    # is the kernel reporting a *program* that crashed, not a fault of its
+    # own. Wine and games produce them; next to ordinary amdgpu or i915
+    # chatter, one used to read as a GPU failure and refuse PLAY until a
+    # reboot.
+    user_trap = re.compile(r"\btraps:\s+\S.*\[\d+\]\s+general protection fault")
+    vendor = re.compile(r"\[nvidia\]|\bnvrm:|\bamdgpu\b|\bi915\b|\bxe\b")
+    for index, line in enumerate(lines):
+        if not generic.search(line) or user_trap.search(line):
+            continue
+        lo, hi = max(0, index - 40), min(len(lines), index + 41)
+        if any(vendor.search(candidate) for candidate in lines[lo:hi]):
+            return True
+    return False
+
+
+_RECOVERED_INTEL_HANG = re.compile(r"\b(?:i915|xe)\b.*\bgpu hang\b")
+
+RECOVERED_HANG_NOTE = (
+    "The Intel GPU hung and was reset during this boot (\"GPU HANG\" in the "
+    "kernel log). Its driver recovered, so the launch goes ahead. If "
+    "Minecraft is what hung it and it happens again, update Mesa, or turn on "
+    "Settings ▸ Advanced ▸ Legacy compatibility renderer.")
+
+
+def _recovered_gpu_hang_in_text(text: str) -> bool:
+    """An Intel GPU hang the driver reset its way out of.
+
+    Such a hang blocked every launch until a reboot, as a "fatal kernel
+    fault", although nothing was left broken: on a UHD 610 the reporter of
+    #301 could not get past it with any setting. A failed reset is still a
+    fault (see _gpu_fault_in_text); this is only the hang it recovered from.
+    """
+    return any(_RECOVERED_INTEL_HANG.search(line)
+               for line in text.lower().splitlines())
+
+
+def _kernel_journal_text(binary: str, runner, boot: int) -> Optional[str]:
+    args = [binary, "-k", "-b", str(boot), "--no-pager", "-o", "cat"]
+    # Keep the tail for the whole selected boot. A current-boot fault must not
+    # become launchable merely because the user waited fifteen minutes, and a
+    # relative --since value would not refer to the selected previous boot.
+    args += ["-n", "5000"]
+    try:
+        result = runner(
+            args,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    return (getattr(result, "stdout", "") + "\n"
+            + getattr(result, "stderr", ""))[-2_000_000:]
+
+
+def _kernel_driver_fault_scope(runner=None, notes=None) -> Optional[str]:
+    """Return ``current``/``previous`` for an unacknowledged kernel fault.
+
+    A recovered GPU hang during this boot is no fault, but it is worth a
+    word: it goes on ``notes`` when a list is given.
+    """
+
+    binary = shutil.which("journalctl")
+    if not binary and runner is not None:
+        binary = "journalctl"
+    if not binary:
+        return None
+    runner = runner or subprocess.run
+    current = _kernel_journal_text(binary, runner, 0)
+    if current is not None and _gpu_fault_in_text(current):
+        return "current"
+    if (notes is not None and current is not None
+            and _recovered_gpu_hang_in_text(current)):
+        notes.append(RECOVERED_HANG_NOTE)
+    if _previous_boot_fault_acknowledged():
+        return None
+    previous = _kernel_journal_text(binary, runner, -1)
+    if previous is not None and _gpu_fault_in_text(previous):
+        return "previous"
+    return None
+
+
+def gpu_safety_acknowledgement_status(
+        marker_path: Optional[Path] = None,
+        journal_runner=None) -> GpuSafetyAcknowledgementStatus:
+    """Return whether an explicit previous-boot acknowledgement is valid.
+
+    This read-only helper is suitable for deciding whether a GUI should offer
+    an acknowledgement action. The mutating function always rechecks it under
+    the launch lock, so callers must not treat a previously returned value as
+    authorization to delete state.
+    """
+
+    marker = Path(marker_path) if marker_path is not None else GPU_LAUNCH_MARKER
+    marker_scope = _acknowledgement_marker_scope(marker)
+    if marker_scope == "active":
+        return GpuSafetyAcknowledgementStatus(
+            "active-launch", False,
+            "The marked Minecraft launch is still active; stop it before "
+            "acknowledging a GPU safety incident.",
+            marker_present=True,
+        )
+    if marker_scope == "current":
+        return GpuSafetyAcknowledgementStatus(
+            "current-boot-launch", False,
+            "The interrupted Minecraft launch happened during this boot. "
+            "PLAY clears it by itself once nothing of that session is left "
+            "running; reboot first if the graphics misbehaved.",
+            marker_present=True,
+        )
+    if marker_scope == "unknown":
+        return GpuSafetyAcknowledgementStatus(
+            "unreadable-marker", False,
+            "The interrupted-launch marker cannot prove that it belongs to a "
+            "previous boot; it cannot be acknowledged safely.",
+            marker_present=True,
+        )
+
+    fault_scope = _kernel_driver_fault_scope(journal_runner)
+    if fault_scope == "current":
+        return GpuSafetyAcknowledgementStatus(
+            "current-boot-fault", False,
+            "The graphics driver reported a fatal fault during this boot. "
+            "Reboot before acknowledging any previous incident.",
+            marker_present=marker_scope == "previous",
+        )
+
+    previous_marker = marker_scope == "previous"
+    previous_fault = fault_scope == "previous"
+    if previous_marker or previous_fault:
+        if not _boot_id():
+            return GpuSafetyAcknowledgementStatus(
+                "boot-id-unavailable", False,
+                "The current boot cannot be identified, so a previous GPU "
+                "incident cannot be acknowledged safely.",
+                marker_present=previous_marker,
+                previous_boot_fault=previous_fault,
+            )
+        details = []
+        if previous_marker:
+            details.append("an interrupted Minecraft launch")
+        if previous_fault:
+            details.append("a fatal graphics-driver event")
+        return GpuSafetyAcknowledgementStatus(
+            "previous-boot-incident", True,
+            "Previous-boot GPU incident available to acknowledge: "
+            + " and ".join(details) + ".",
+            marker_present=previous_marker,
+            previous_boot_fault=previous_fault,
+        )
+
+    return GpuSafetyAcknowledgementStatus(
+        "none", False,
+        "No previous-boot GPU safety incident is available to acknowledge.",
+    )
+
+
+def graphics_safety_problem(
+        environ: Optional[Mapping[str, str]] = None,
+        xrandr_runner=None,
+        journal_runner=None,
+        atom_probe=None,
+        provider_probe=None,
+        notes=None,
+        include_interrupted=True) -> Optional[str]:
+    """Return an actionable reason to refuse launch, or ``None``.
+
+    No Vulkan, OpenGL, ``nvidia-smi`` or DRM ioctl is performed here.
+    Advisories that do not refuse the launch go on ``notes`` when given.
+    ``include_interrupted=False`` skips the interrupted-launch marker, to
+    find what else a refusal for it was hiding.
+    """
+
+    env = os.environ if environ is None else environ
+    if include_interrupted:
+        interrupted = interrupted_launch_problem()
+        if interrupted:
+            return InterruptedLaunchProblem(interrupted)
+    fault_scope = _kernel_driver_fault_scope(journal_runner, notes)
+    if fault_scope == "current":
+        return (
+            "the graphics driver has already reported a fatal kernel fault "
+            "during this boot; reboot before starting another GPU process"
+        )
+    if fault_scope == "previous":
+        return (
+            "the graphics driver reported a fatal kernel fault before the last "
+            "reboot; after repairing/updating the driver, acknowledge it with "
+            f"'{acknowledge_gpu_crash_command()}'"
+        )
+    if _x11_session(env):
+        providers = _xrandr_provider_count(env, xrandr_runner)
+        if providers is None:
+            probe = (_randr_provider_count if provider_probe is None
+                     else provider_probe)
+            providers = probe(env)
+        if providers == 0:
+            if _nested_gamescope_session(env, atom_probe):
+                return None
+            problem = (
+                "the X11 session exposes zero RandR GPU providers and is "
+                "running on a fallback framebuffer/software renderer"
+            )
+            if _nvidia_device_with_mesa_glx():
+                problem += (
+                    "; the NVIDIA kernel device is loaded while Debian's GLX "
+                    "alternative points to mesa-diverted"
+                )
+            return problem
+        if providers is None:
+            if _xorg_software_fallback():
+                problem = (
+                    "Xorg failed to open its DRM device and fell back to "
+                    "FBDEV/software rendering"
+                )
+                if _nvidia_device_with_mesa_glx():
+                    problem += (
+                        "; the NVIDIA kernel device is loaded while Debian's "
+                        "GLX alternative points to mesa-diverted"
+                    )
+                return problem
+            return (
+                "the launcher could not verify any X11 hardware provider "
+                "through RandR without opening the GPU"
+            )
+    return None
+
+
+def require_safe_graphics_session(
+        environ: Optional[Mapping[str, str]] = None) -> None:
+    """Refuse a launch which could turn a known driver fault into a hard lock."""
+
+    env = os.environ if environ is None else environ
+    notes = []
+    problem = graphics_safety_problem(env, notes=notes)
+    if not problem:
+        for note in notes:
+            warn(note)
+        return
+    marker_problem = isinstance(problem, InterruptedLaunchProblem)
+    if env_flag(env.get("GOMCEIX_ALLOW_UNSAFE_GPU")):
+        bypassed = [problem]
+        if marker_problem:
+            # The marker is checked first and hides every check after it;
+            # the override skips those too, so say what they found.
+            hidden = graphics_safety_problem(
+                env, notes=notes, include_interrupted=False)
+            if hidden:
+                bypassed.append(hidden)
+        warn("GOMCEIX_ALLOW_UNSAFE_GPU=1 bypasses the graphics safety block: "
+             + "; and ".join(bypassed) + ".")
+        return
+    advice = "" if marker_problem else (
+        " Repair/reinstall the host GPU driver, ensure the desktop uses the "
+        "hardware DRM provider, then reboot.")
+    die("Unsafe graphics session: " + problem + ". Gomceix did not "
+        "start Wine, Vulkan, or Minecraft." + advice + " Advanced override "
+        "(at your own risk): start the launcher itself with "
+        "GOMCEIX_ALLOW_UNSAFE_GPU=1, as in "
+        f"'{unsafe_gpu_override_command(env)}' — the custom environment "
+        "variables in Settings only reach the game."
+        + _steam_shortcut_override_hint(env))

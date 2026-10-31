@@ -1,0 +1,5 @@
+{ "schema": 1, "id": "paper", "name": "Paper", "scheme": "light",
+  "colors": { "accent": "#c4501b", "window": "#f6f1ea", "card": "#ffffff", "header": "#ebe4d9",
+              "sidebar": "#ede6db", "popover": "#ffffff", "fg": "#2a2520",
+              "success": "#2ec27e", "warning": "#cd9309", "error": "#c01c28" },
+  "shape": { "radius": 10, "spacing": 12 } }

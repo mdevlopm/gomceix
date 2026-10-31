@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "obsidian",
+  "name": "Obsidian",
+  "scheme": "dark",
+  "style": "glow",
+  "colors": {
+    "accent": "#3ddc97",
+    "window": "#050607",
+    "view": "#050607",
+    "card": "#0f1114",
+    "header": "#050607",
+    "sidebar": "#08090b",
+    "popover": "#14171b",
+    "fg": "#eceff4",
+    "success": "#57c785",
+    "warning": "#e5a50a",
+    "error": "#f66151"
+  },
+  "shape": {
+    "radius": 16,
+    "spacing": 12
+  }
+}

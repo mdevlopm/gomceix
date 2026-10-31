@@ -1,0 +1,186 @@
+/* Structural styling only. Colours come from libadwaita named colours, which the
+   theme engine overrides; never hard-code a colour here. */
+
+/* ---- navigation ---------------------------------------------------------- */
+.navigation-sidebar { padding: 10px 8px; }
+.navigation-sidebar > row {
+  border-radius: 12px;
+  margin: 2px 0;
+  padding: 2px 4px;
+  transition: background-color 200ms ease, color 200ms ease;
+}
+.navigation-sidebar > row:selected {
+  background-color: alpha(@accent_bg_color, 0.16);
+  color: @accent_color;
+}
+.navigation-sidebar > row:selected image { color: @accent_color; }
+headerbar.flat { background: transparent; box-shadow: none; }
+
+/* ---- home banner --------------------------------------------------------- */
+.gx-hero {
+  padding: 36px 40px;
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  background-color: @card_bg_color;
+  background-image:
+    radial-gradient(circle at 88% 8%, alpha(@accent_bg_color, 0.34), transparent 55%),
+    radial-gradient(circle at 0% 100%, alpha(@accent_bg_color, 0.14), transparent 50%);
+}
+.gx-overline { font-size: 9pt; font-weight: 700; letter-spacing: 2px; opacity: 0.6; }
+.gx-version { font-size: 60pt; font-weight: 800; letter-spacing: -2px; }
+.gx-version.gx-version-md { font-size: 38pt; letter-spacing: -1px; }
+.gx-version.gx-version-sm { font-size: 26pt; letter-spacing: -0.5px; }
+.gx-version.gx-version-xs { font-size: 18pt; letter-spacing: 0; }
+.gx-hero-title { font-size: 30pt; font-weight: 800; letter-spacing: -0.5px; }
+.gx-chip {
+  padding: 3px 12px;
+  border-radius: 999px;
+  background-color: alpha(@accent_bg_color, 0.18);
+  border: 1px solid alpha(@accent_bg_color, 0.30);
+  font-weight: 600;
+}
+.gx-chip.muted { background-color: alpha(@window_fg_color, 0.07); border-color: alpha(@window_fg_color, 0.10); }
+
+.gx-play {
+  padding: 14px 48px;
+  font-weight: 800;
+  font-size: 14pt;
+  letter-spacing: 1px;
+  transition: all 220ms ease;
+}
+.gx-play.suggested-action { animation: gx-glow 2.4s ease-out infinite; }
+.gx-play:hover { box-shadow: 0 6px 28px alpha(@accent_bg_color, 0.55); }
+.gx-play:active { opacity: 0.85; }
+.gx-play.destructive-action, .gx-play:disabled { animation: none; }
+@keyframes gx-glow {
+  from { box-shadow: 0 0 0 0 alpha(@accent_bg_color, 0.55); }
+  to   { box-shadow: 0 0 0 20px alpha(@accent_bg_color, 0); }
+}
+
+/* ---- cards and tiles ----------------------------------------------------- */
+.gx-card { background-color: @card_bg_color; color: @card_fg_color; padding: 16px; }
+.gx-tile {
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  padding: 14px 16px;
+  transition: all 220ms ease;
+}
+.gx-tile:hover { border-color: alpha(@accent_bg_color, 0.45); }
+.gx-tile-label { font-size: 8.5pt; font-weight: 700; letter-spacing: 1.5px; opacity: 0.55; }
+.gx-tile dropdown > button { background: transparent; box-shadow: none; padding: 2px 0; font-weight: 700; font-size: 13pt; }
+.gx-tile dropdown > button:hover { background: alpha(@window_fg_color, 0.06); }
+.gx-page { padding: 8px 4px; }
+
+/* ---- setup screen -------------------------------------------------------- */
+.gx-ring { color: @accent_bg_color; }
+.gx-percent { font-size: 42pt; font-weight: 800; letter-spacing: -1px; }
+.gx-setup-title { font-size: 20pt; font-weight: 800; }
+.gx-step {
+  padding: 10px 14px;
+  border-radius: 12px;
+  opacity: 0.45;
+  transition: all 300ms ease;
+}
+.gx-step.active { opacity: 1; background-color: alpha(@accent_bg_color, 0.12); }
+.gx-step.done { opacity: 0.85; }
+.gx-step.done image.gx-check { color: @success_color; }
+.gx-step-title { font-weight: 700; }
+progressbar.gx-bar trough { min-height: 8px; border-radius: 999px; background-color: alpha(@window_fg_color, 0.10); }
+progressbar.gx-bar progress { min-height: 8px; border-radius: 999px; background-color: @accent_bg_color; }
+
+/* ---- buttons: one consistent family -------------------------------------- */
+button.gx-btn {
+  border-radius: 999px;
+  padding: 8px 22px;
+  min-height: 22px;
+  font-weight: 700;
+  transition: all 200ms ease;
+}
+button.gx-btn-small { padding: 3px 16px; min-height: 20px; }
+button.gx-btn-primary:hover { box-shadow: 0 4px 20px alpha(@accent_bg_color, 0.45); }
+button.gx-btn-secondary {
+  background: transparent;
+  box-shadow: none;
+  border: 1px solid alpha(@window_fg_color, 0.20);
+}
+button.gx-btn-secondary:hover { border-color: alpha(@accent_bg_color, 0.70); background-color: alpha(@accent_bg_color, 0.10); }
+button.gx-btn-danger:hover { box-shadow: 0 4px 20px alpha(@error_bg_color, 0.45); }
+button.gx-btn-flat { background: transparent; box-shadow: none; }
+button.gx-btn-flat:hover { background-color: alpha(@window_fg_color, 0.08); }
+button.gx-btn:active { opacity: 0.8; }
+button.gx-btn:disabled { opacity: 0.45; }
+
+/* ---- popovers: drop-down lists, menus ------------------------------------ */
+popover.background > arrow { min-width: 0; min-height: 0; background: transparent; border: none; box-shadow: none; opacity: 0; }
+popover.background > contents {
+  padding: 6px;
+  border-radius: 16px;
+  min-width: 190px;
+  background-color: alpha(@popover_bg_color, 0.97);
+  border: 1px solid alpha(@window_fg_color, 0.12);
+  box-shadow: 0 18px 44px alpha(black, 0.55), 0 2px 8px alpha(black, 0.35);
+  animation: gx-pop 170ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes gx-pop {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+popover.background listview, popover.background list { background: transparent; }
+popover.background listview > row,
+popover.background modelbutton,
+popover.background button.gx-menu-item {
+  border-radius: 10px;
+  margin: 1px 0;
+  padding: 9px 12px;
+  min-height: 20px;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  font-weight: 500;
+  transition: background-color 140ms ease, color 140ms ease, padding 140ms ease;
+}
+popover.background listview > row:hover,
+popover.background modelbutton:hover,
+popover.background button.gx-menu-item:hover {
+  background-color: alpha(@accent_bg_color, 0.16);
+  padding-left: 16px;
+}
+popover.background listview > row:selected {
+  background-color: alpha(@accent_bg_color, 0.24);
+  color: @accent_color;
+  font-weight: 700;
+}
+popover.background listview > row image,
+popover.background listview > row .checkmark { color: @accent_color; }
+popover.background button.gx-menu-item.danger { color: @error_color; }
+popover.background button.gx-menu-item.danger:hover { background-color: alpha(@error_bg_color, 0.18); }
+popover.background separator { margin: 4px 8px; background-color: alpha(@window_fg_color, 0.10); }
+popover.background scrollbar { opacity: 0.6; }
+
+/* ---- choice button (drop-down that opens below) and segmented control ---- */
+menubutton.gx-choice > button {
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 8px 4px 0;
+  font-weight: 700;
+  font-size: 13pt;
+  transition: background-color 160ms ease, padding 160ms ease;
+}
+menubutton.gx-choice > button:hover { background-color: alpha(@window_fg_color, 0.07); padding-left: 8px; }
+popover.background button.gx-menu-item.chosen { color: @accent_color; font-weight: 700; }
+.gx-seg {
+  padding: 3px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.07);
+  border: 1px solid alpha(@window_fg_color, 0.08);
+}
+.gx-seg-item {
+  border-radius: 999px;
+  padding: 6px 20px;
+  background: transparent;
+  box-shadow: none;
+  font-weight: 700;
+  transition: all 220ms ease;
+}
+.gx-seg-item:hover { background-color: alpha(@window_fg_color, 0.07); }
+.gx-seg-item:checked { background-color: @accent_bg_color; color: @accent_fg_color; box-shadow: 0 2px 14px alpha(@accent_bg_color, 0.40); }
+.gx-mode-note { font-size: 10pt; opacity: 0.65; }

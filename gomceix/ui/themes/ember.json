@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "ember",
+  "name": "Ember",
+  "scheme": "dark",
+  "style": "flat",
+  "colors": {
+    "accent": "#ff8a3d",
+    "window": "#080605",
+    "view": "#080605",
+    "card": "#14100d",
+    "header": "#080605",
+    "sidebar": "#0b0907",
+    "popover": "#1b1612",
+    "fg": "#f3ece6",
+    "success": "#57c785",
+    "warning": "#e5a50a",
+    "error": "#f66151"
+  },
+  "shape": {
+    "radius": 16,
+    "spacing": 12
+  }
+}

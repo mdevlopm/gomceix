@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "aurora",
+  "name": "Aurora",
+  "scheme": "dark",
+  "style": "glass",
+  "colors": {
+    "accent": "#8b7cff",
+    "window": "#09070f",
+    "view": "#09070f",
+    "card": "#14101f",
+    "header": "#09070f",
+    "sidebar": "#0c0915",
+    "popover": "#1a1528",
+    "fg": "#ece9f8",
+    "success": "#57c785",
+    "warning": "#e5a50a",
+    "error": "#f66151"
+  },
+  "shape": {
+    "radius": 16,
+    "spacing": 12
+  }
+}

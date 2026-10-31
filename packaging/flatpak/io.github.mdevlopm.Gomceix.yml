@@ -1,0 +1,157 @@
+# Flatpak manifest for Gomceix, a GTK 4 / libadwaita launcher for Minecraft
+# Bedrock Edition. Build instructions: packaging/flatpak/README.md
+#
+# Shape of the app, because it decides every permission below:
+#   * The launcher itself is plain Python + PyGObject (GTK 4, libadwaita), which
+#     the GNOME runtime already ships. Only `cryptography` (Xbox/Microsoft token
+#     signing) and `python-xlib` are added, from hash-pinned PyPI files.
+#   * The launcher does NOT bundle Minecraft, Wine or Proton. At run time it
+#     downloads pinned, SHA-256 checked builds (game engine, umu-launcher,
+#     Store tools) into its own data folder and starts the game through
+#     umu -> pressure-vessel -> Wine. That is why the game needs a GPU, X11,
+#     audio and the ability to create a nested sandbox.
+#
+# The GNOME runtime is used (not org.freedesktop.Platform) because the Store
+# download tool opens the Microsoft sign-in in a WebKitGTK webview and links
+# libwebkit2gtk-4.1 unconditionally; only the GNOME runtime ships that library.
+app-id: io.github.mdevlopm.Gomceix
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+command: gomceix
+
+finish-args:
+  # Wine/Proton and the X11 side of the game use shared memory with the X server.
+  - --share=ipc
+  # Game and engine downloads, Microsoft/Xbox sign-in, multiplayer, updates.
+  - --share=network
+  # The launcher window is native Wayland when the session offers it. The game
+  # itself runs through Wine's X11 driver (the Wayland driver is opt-in), so a
+  # Wayland session still needs XWayland for the game: both sockets are needed.
+  - --socket=x11
+  - --socket=wayland
+  # Game audio (Wine's PulseAudio driver; also works on PipeWire sessions).
+  - --socket=pulseaudio
+  # GPU for Vulkan/DXVK/VKD3D and game controllers (the game reads hidraw
+  # gamepads). Both need /dev/dri and /dev/input, i.e. --device=all.
+  - --device=all
+  # umu-launcher runs the game inside the Steam Linux Runtime, which
+  # pressure-vessel builds as a Flatpak sub-sandbox through the
+  # org.freedesktop.portal.Flatpak portal (that needs no extra permission).
+  #   devel     - Wine needs ptrace
+  #   multiarch - lets the sub-sandbox use 32-bit drivers when the user has the
+  #               org.freedesktop.Platform.GL32 / Compat.i386 extensions
+  #   per-app-dev-shm - the sub-sandbox shares /dev/shm with the launcher
+  #               (otherwise pressure-vessel warns about flatpak#4214)
+  - --allow=devel
+  - --allow=multiarch
+  - --allow=per-app-dev-shm
+  # Discord Rich Presence: the Discord client listens on a socket in the HOST
+  # runtime directory and the sandbox gets a runtime dir of its own, so without
+  # these two paths a play session is never announced. One socket each (the
+  # native build and the Flatpak build of Discord) and nothing else. Discord
+  # must be running before Gomceix is started for the bind to exist.
+  - --filesystem=xdg-run/discord-ipc-0
+  - --filesystem=xdg-run/app/com.discordapp.Discord/discord-ipc-0
+  # Deliberately absent: --filesystem=home/host (game, saves and downloads live
+  # in ~/.var/app/io.github.mdevlopm.Gomceix; user files go through the file
+  # chooser portal), --talk-name=org.freedesktop.Flatpak, --share=pcsc, etc.
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/doc
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  # ---------------------------------------------------------------------------
+  # Python dependencies, installed offline (no network in the build sandbox).
+  # Everything is pinned by sha256. Regenerate with
+  # packaging/flatpak/update-python-deps.py (see README).
+  #   cryptography 50.0.2  upstream manylinux wheel (abi3, works on Python 3.14)
+  #   cffi 2.1.1           cp314 manylinux wheel   (cryptography dependency)
+  #   pycparser 3.12       pure wheel               (cffi dependency)
+  #   python-xlib 0.33     pure wheel               (monitor geometry via RandR)
+  #   six 1.17.0           pure wheel               (python-xlib dependency)
+  # Not packaged: py7zr (optional, only used for OptiScaler archives when no
+  # 7-Zip binary exists).
+  # NOTE for a Flathub submission: Flathub prefers source builds. cryptography
+  # then has to be built from its sdist with the org.freedesktop.Sdk.Extension.rust-stable
+  # extension and vendored cargo sources (flatpak-cargo-generator). Binary
+  # wheels are accepted here for the self-hosted/local bundle.
+  # ---------------------------------------------------------------------------
+  - name: python3-dependencies
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} --no-build-isolation --no-deps
+        cryptography cffi pycparser python-xlib six
+      - PYTHONPATH=${FLATPAK_DEST}/lib/python3.14/site-packages
+        python3 -c "import cryptography, cffi, Xlib; print('deps ok', cryptography.__version__)"
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/4f/87/ef344a9e616871f2519c22d6afcda79ddd5d35e9592d95eb6e677608d055/cryptography-50.0.2-cp39-abi3-manylinux_2_28_x86_64.whl
+        sha256: f21e8a22c8605750c7af886bab299a363721264061b4ac0a30efb73cfd58efc5
+      - type: file
+        url: https://files.pythonhosted.org/packages/e9/02/4e7d553a7ac4b4238b38b3c1b80d486e9d4436f8d2acbf87a0997fe3f402/cffi-2.1.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+        sha256: b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96
+      - type: file
+        url: https://files.pythonhosted.org/packages/b6/ae/315bbeee126a769cbde43cf4908acb4b40408d8bf8bbf334dd7368d8dadf/pycparser-3.12-py3-none-any.whl
+        sha256: a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
+      - type: file
+        url: https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl
+        sha256: c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398
+      - type: file
+        url: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
+        sha256: 4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+
+  # ---------------------------------------------------------------------------
+  # The launcher. Built from the working tree (type: dir) so the bundle matches
+  # the checkout it is built from. For a release, replace the dir source with
+  #   - type: git
+  #     url: https://github.com/mdevlopm/gomceix
+  #     tag: vX.Y.Z
+  #     commit: <git rev-parse vX.Y.Z^{commit}>
+  # ---------------------------------------------------------------------------
+  - name: gomceix
+    buildsystem: simple
+    build-commands:
+      # The three Windows helper programs (DLL injector, fullscreen nudge,
+      # desktop bridge) are cross-compiled from src/*.c with mingw and committed
+      # as gomceix/core/*.exe. mingw is not in the Flatpak SDK, so they are used
+      # as shipped. Refuse to build an app whose helpers are missing or are not
+      # PE executables, instead of producing one that breaks at launch time.
+      - |
+        for f in injector fullscreen-nudge desktop-bridge; do
+          p=gomceix/core/$f.exe
+          test -s "$p" || { echo "ERROR: $p is missing or empty; build it from src/ with mingw first" >&2; exit 1; }
+          test "$(head -c2 "$p")" = MZ || { echo "ERROR: $p is not a PE executable" >&2; exit 1; }
+        done
+      - pip3 install --verbose --exists-action=i --no-index --prefix=${FLATPAK_DEST}
+        --no-build-isolation --no-deps .
+      - find ${FLATPAK_DEST}/lib/python3.14/site-packages/gomceix -type d -name __pycache__ -prune -exec rm -rf '{}' +
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.mdevlopm.Gomceix/LICENSE
+      - install -Dm644 data/io.github.mdevlopm.Gomceix.desktop ${FLATPAK_DEST}/share/applications/io.github.mdevlopm.Gomceix.desktop
+      - install -Dm644 data/io.github.mdevlopm.Gomceix.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.mdevlopm.Gomceix.metainfo.xml
+      - install -Dm644 data/icons/io.github.mdevlopm.Gomceix.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.mdevlopm.Gomceix.svg
+      - PYTHONPATH=${FLATPAK_DEST}/lib/python3.14/site-packages python3 -c "import gomceix, gomceix.core.cli; print('gomceix', gomceix.__version__)"
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .github
+          - .idea
+          - .vscode
+          - .claude
+          - .venv
+          - .pytest_cache
+          - .ruff_cache
+          - .flatpak-builder
+          - agent-work
+          - dist
+          - build
+          - tests
+          - docs

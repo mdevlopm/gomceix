@@ -1,0 +1,5 @@
+{ "schema": 1, "id": "midnight", "name": "Midnight", "scheme": "dark",
+  "colors": { "accent": "#5b8def", "window": "#14161c", "card": "#1d212b", "header": "#10121a",
+              "sidebar": "#0f1117", "popover": "#1d212b", "fg": "#e8ebf2",
+              "success": "#57c785", "warning": "#e5a50a", "error": "#f66151" },
+  "shape": { "radius": 14, "spacing": 12 } }

@@ -1,0 +1,26 @@
+# What the source distribution carries beyond the package itself (setuptools
+# already adds the package, its package-data and pyproject.toml).
+include LICENSE README.md pyproject.toml MANIFEST.in pytest.ini
+
+# Sources of the Windows helper programs shipped as gomceix/core/*.exe.
+graft src
+# Build, install and verification scripts.
+graft scripts
+graft packaging
+# Desktop integration: .desktop file, AppStream metainfo, icons.
+graft data
+graft docs
+graft tests
+
+# The helper programs are part of the package; keep them in the sdist even when
+# package-data discovery changes.
+include gomceix/core/*.exe
+
+global-exclude __pycache__ *.py[cod] *.part *.gomceix-orig .DS_Store
+prune tests/__pycache__
+prune agent-work
+prune packaging/flatpak/.flatpak-builder
+prune packaging/flatpak/build-dir
+prune packaging/flatpak/repo
+global-exclude *.flatpak *.flatpak-bundle
+prune .github

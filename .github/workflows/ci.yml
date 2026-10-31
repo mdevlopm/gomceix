@@ -1,0 +1,100 @@
+# Lint, unit tests and packaging checks for every push to main and every pull
+# request. GTK 4, libadwaita and PyGObject are not pip packages, so the jobs
+# use the runner's own Python 3.12 (Ubuntu 24.04) and a virtual environment
+# created with --system-site-packages.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-venv python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 shellcheck \
+            mutter dbus-bin
+      - name: Python environment
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --quiet --disable-pip-version-check \
+            pytest ruff cryptography python-xlib setuptools
+      - name: Lint (pyflakes rules)
+        run: .venv/bin/ruff check --select F gomceix tests
+      - name: Shell scripts
+        run: shellcheck -x scripts/*.sh
+      - name: Tests
+        run: .venv/bin/python -m pytest -q
+
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-venv python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 shellcheck \
+            mutter dbus-bin
+      - name: Build tools
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --quiet --disable-pip-version-check build twine
+      - name: Build sdist and wheel, then check them
+        # twine check + packaging/python/check_dist.py (every file of the tree
+        # is in the wheel and the sdist, version matches gomceix.__version__)
+        run: PYTHON="$PWD/.venv/bin/python" bash scripts/build-dist.sh --out dist
+      - name: Install the wheel in a clean environment and run it
+        run: bash scripts/smoke-installed.sh --no-gui dist/gomceix-*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+          retention-days: 7
+
+  gui-smoke:
+    # Starts the installed application inside a headless mutter. Hosted runners
+    # have no GPU, so this is best effort and does not fail the workflow.
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-venv python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+            mutter dbus libgl1-mesa-dri libegl1
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+      - name: Headless GUI smoke test of the installed wheel
+        run: bash scripts/smoke-installed.sh dist/gomceix-*.whl
+
+  # PLACEHOLDER (coordinator): the Flatpak build job goes here, for example
+  #   flatpak:
+  #     needs: test
+  #     runs-on: ubuntu-24.04
+  #     steps: ... flatpak-builder against packaging/flatpak/io.github.mdevlopm.Gomceix.yml
+  # and its bundle should be uploaded as an artifact next to python-dist.

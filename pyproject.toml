@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gomceix"
+description = "A GNOME-style launcher for Minecraft Bedrock Edition on Linux"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dynamic = ["version"]
+# GTK 4, libadwaita and PyGObject come from the system (they are not pip wheels).
+dependencies = [
+  "cryptography",
+  "python-xlib",
+]
+keywords = ["minecraft", "bedrock", "launcher", "gtk4", "libadwaita", "linux"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications :: GTK",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Games/Entertainment",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "build", "twine"]
+
+[tool.setuptools.dynamic]
+version = { attr = "gomceix.__version__" }
+
+[tool.setuptools]
+include-package-data = false
+
+# Packages are discovered, not listed: a new subpackage can no longer be left
+# out of the wheel unnoticed. tests/test_packaging_data.py guards the data files.
+[tool.setuptools.packages.find]
+include = ["gomceix", "gomceix.*"]
+namespaces = false
+
+# Only the files named below ship in the wheel; MANIFEST.in decides the sdist.
+# Helper programs extracted at runtime (built by scripts/build-helpers.sh from
+# src/*.c), translations, theme tokens, backgrounds and styling.
+[tool.setuptools.package-data]
+"gomceix.core" = ["*.exe"]
+"gomceix" = ["locales/*.json"]
+"gomceix.ui" = ["style.css", "themes/*.json", "backgrounds/*.svg"]
+
+[project.scripts]
+gomceix = "gomceix.core.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/mdevlopm/gomceix"
+Repository = "https://github.com/mdevlopm/gomceix"
+"Bug Tracker" = "https://github.com/mdevlopm/gomceix/issues"

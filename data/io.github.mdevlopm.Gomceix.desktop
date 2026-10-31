@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Gomceix
+GenericName=Minecraft Bedrock launcher
+Comment=Launcher for Minecraft Bedrock Edition
+Comment[tr]=Minecraft Bedrock Edition başlatıcısı
+Comment[zh_CN]=Minecraft 基岩版启动器
+Exec=gomceix gui
+Icon=io.github.mdevlopm.Gomceix
+Terminal=false
+Categories=GTK;GNOME;Game;
+Keywords=Minecraft;Bedrock;Launcher;Wine;Proton;
+StartupNotify=true
+StartupWMClass=io.github.mdevlopm.Gomceix
+SingleMainWindow=true
