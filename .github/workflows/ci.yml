@@ -26,12 +26,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             python3-venv python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 shellcheck \
-            mutter dbus-bin
+            mutter dbus-bin fonts-cantarell
       - name: Python environment
         run: |
           python3 -m venv --system-site-packages .venv
           .venv/bin/pip install --quiet --disable-pip-version-check \
-            pytest ruff cryptography python-xlib setuptools
+            pytest ruff cryptography python-xlib "setuptools>=77.0.3"
       - name: Lint (pyflakes rules)
         run: .venv/bin/ruff check --select F gomceix tests
       - name: Shell scripts
