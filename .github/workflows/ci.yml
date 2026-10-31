@@ -31,7 +31,7 @@ jobs:
         run: |
           python3 -m venv --system-site-packages .venv
           .venv/bin/pip install --quiet --disable-pip-version-check \
-            pytest ruff cryptography python-xlib "setuptools>=77.0.3"
+            pytest ruff cryptography python-xlib "setuptools>=77.0.3" "packaging>=24.2"
       - name: Lint (pyflakes rules)
         run: .venv/bin/ruff check --select F gomceix tests
       - name: Shell scripts
