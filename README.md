@@ -4,7 +4,7 @@ A GNOME-style launcher for **Minecraft Bedrock Edition** on Linux, built with GT
 
 > Early development: expect rough edges, and please report them.
 
-![The Play page](docs/screenshots/play.png)
+![Gomceix in ProxyPass mode, with a custom theme and background](docs/screenshots/launcher.png)
 
 ## What it does
 - Downloads the game from the Microsoft Store with **your own account**, sets everything up and starts it.
