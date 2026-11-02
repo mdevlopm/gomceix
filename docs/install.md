@@ -72,7 +72,7 @@ since is kept and reported). Your game, sign-ins and settings in
 
   ```bash
   python3 -m venv --system-site-packages ~/gomceix-venv
-  ~/gomceix-venv/bin/pip install gomceix-0.1.0-py3-none-any.whl
+  ~/gomceix-venv/bin/pip install gomceix-0.1.1-py3-none-any.whl
   ~/gomceix-venv/bin/gomceix
   ```
 

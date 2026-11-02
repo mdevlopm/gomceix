@@ -23,13 +23,30 @@
   </description>
   <launchable type="desktop-id">io.github.mdevlopm.Gomceix.desktop</launchable>
   <url type="homepage">https://github.com/mdevlopm/gomceix</url>
+  <url type="bugtracker">https://github.com/mdevlopm/gomceix/issues</url>
   <url type="vcs-browser">https://github.com/mdevlopm/gomceix</url>
-  <!--
-    Screenshots: none yet. AppStore screenshots must be fetched from a public
-    https URL, and there is no hosted copy to point at, so no <screenshots>
-    element is declared rather than a fake link. Add one (default="true",
-    16:9, with a <caption>) once a screenshot is published in the repository.
-  -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>The Play page: pick a version and start the game</caption>
+      <image type="source" width="1280" height="720">https://raw.githubusercontent.com/mdevlopm/gomceix/v0.1.1/docs/screenshots/play.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Installed game versions</caption>
+      <image type="source" width="1280" height="720">https://raw.githubusercontent.com/mdevlopm/gomceix/v0.1.1/docs/screenshots/library.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Store and Microsoft sign-ins</caption>
+      <image type="source" width="1280" height="720">https://raw.githubusercontent.com/mdevlopm/gomceix/v0.1.1/docs/screenshots/accounts.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Themes, language and launch settings</caption>
+      <image type="source" width="1280" height="720">https://raw.githubusercontent.com/mdevlopm/gomceix/v0.1.1/docs/screenshots/settings.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The Play page in the dark style</caption>
+      <image type="source" width="1280" height="720">https://raw.githubusercontent.com/mdevlopm/gomceix/v0.1.1/docs/screenshots/play-dark.png</image>
+    </screenshot>
+  </screenshots>
   <categories>
     <category>Game</category>
   </categories>
@@ -61,6 +78,14 @@
     <color type="primary" scheme_preference="dark">#3b4cca</color>
   </branding>
   <releases>
+    <release version="0.1.1" date="2026-11-02">
+      <description>
+        <p>Store listing update.</p>
+        <ul>
+          <li>Screenshots and an issue tracker link in the app details</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-29">
       <description>
         <p>First release.</p>

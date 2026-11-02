@@ -2,7 +2,9 @@
 
 A GNOME-style launcher for **Minecraft Bedrock Edition** on Linux, built with GTK 4 and libadwaita.
 
-> Early development. The new interface is being built on top of a tested launch/download backend; some pages still show demo data.
+> Early development: expect rough edges, and please report them.
+
+![The Play page](docs/screenshots/play.png)
 
 ## What it does
 - Downloads the game from the Microsoft Store with **your own account**, sets everything up and starts it.

@@ -25,13 +25,13 @@ flatpak-builder --user --force-clean --disable-rofiles-fuse \
   --state-dir=~/flatpak-build/state --repo=~/flatpak-build/repo \
   ~/flatpak-build/build io.github.mdevlopm.Gomceix.yml
 flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-  ~/flatpak-build/repo dist/Gomceix-0.1.0-x86_64.flatpak io.github.mdevlopm.Gomceix
+  ~/flatpak-build/repo dist/Gomceix-0.1.1-x86_64.flatpak io.github.mdevlopm.Gomceix
 ```
 
 ## Install, run, uninstall
 
 ```bash
-flatpak install --user dist/Gomceix-0.1.0-x86_64.flatpak
+flatpak install --user dist/Gomceix-0.1.1-x86_64.flatpak
 flatpak run io.github.mdevlopm.Gomceix            # or: ... gomceix doctor
 flatpak uninstall --user io.github.mdevlopm.Gomceix
 flatpak uninstall --user --delete-data io.github.mdevlopm.Gomceix   # also removes ~/.var/app/<id>
